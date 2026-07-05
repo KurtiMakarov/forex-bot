@@ -1,50 +1,49 @@
 app:
   name: "Stocks Trading AI"
-  version: "4.0.0"
+  version: "4.1.0"
   debug: false
 
 broker:
+  # paper_trader | ibkr
   type: "paper_trader"
+  mode: "paper"           # paper | live
+  allow_live_trading: false
   ib_host: "127.0.0.1"
   ib_port: 7497
   ib_client_id: 1
 
-# 13 АКЦИИ ОТ РАЗЛИЧНИ СЕКТОРИ
 data:
   supported_pairs:
-    # Технологични (5)
     - "AAPL"
     - "MSFT"
     - "GOOGL"
     - "TSLA"
     - "NVDA"
-    # E-commerce & Social (2)
     - "AMZN"
     - "META"
-    # Финансови (2)
     - "JPM"
     - "V"
-    # Здравеопазване (2)
     - "JNJ"
     - "UNH"
-    # Енергия (2)
     - "XOM"
     - "CVX"
   historical_days: 100
 
 trading:
-  risk_per_trade: 0.02
-  max_daily_loss: 0.05
+  # намаляваме началния риск за тестов период
+  risk_per_trade: 0.005       # 0.5%
+  max_daily_loss: 0.02        # 2%
   min_confidence: 0.65
   max_open_positions: 5
+  kill_switch_on_daily_loss: true
 
 telegram:
-  token: "8857498820:AAHiKTrqUOvuiq-2y_5GecwkiNapToa_lY4"
-  chat_id: "896074085"
+  token: "${TELEGRAM_TOKEN}"  # никога реален token в git
+  chat_id: "${TELEGRAM_CHAT_ID}"
 
 api_keys:
-  news_api: ""
-  alpha_vantage: ""
+  news_api: "${NEWS_API_KEY}"
+  alpha_vantage: "${ALPHA_VANTAGE_KEY}"
 
 strategies:
   enabled:
