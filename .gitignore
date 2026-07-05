@@ -6,3 +6,6 @@ __pycache__/
 venv/
 data/
 .DS_Store
+state.json
+state.json.old
+.idea/
