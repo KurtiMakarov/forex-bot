@@ -1,4 +1,4 @@
-"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling + live readiness gate"""
+"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling + live readiness + emergency stop"""
 import time
 import sys
 import os
@@ -15,6 +15,9 @@ from utils.config import Config
 from utils.live_readiness import evaluate_live_readiness
 
 logger = setup_logger('bot_runner')
+
+
+EMERGENCY_STOP_FILE = "runtime/EMERGENCY_STOP"
 
 
 def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
@@ -114,6 +117,7 @@ class TradingBot:
 
         self.journal_path = self.config.get('trading.journal_path', 'journal/trades.jsonl')
         os.makedirs(os.path.dirname(self.journal_path), exist_ok=True)
+        os.makedirs("runtime", exist_ok=True)
 
         # LIVE READINESS GATE
         self.live_gate_enabled = bool(self.config.get('trading.live_readiness.enabled', True))
@@ -171,6 +175,9 @@ class TradingBot:
             except Exception:
                 return 0
         return 0
+
+    def _emergency_stop_active(self) -> bool:
+        return os.path.exists(EMERGENCY_STOP_FILE)
 
     def _evaluate_live_gate(self):
         if self.broker_mode != "live":
@@ -244,6 +251,11 @@ class TradingBot:
         logger.info(f"--- 🔄 New Scan Cycle: {datetime.now().strftime('%H:%M:%S')} ---")
         broker = self.engine.broker
 
+        emergency_active = self._emergency_stop_active()
+        if emergency_active:
+            logger.error("🛑 EMERGENCY STOP ACTIVE: all new orders are blocked.")
+            self._journal("risk_halt", {"reason": "emergency_stop_active"})
+
         current_prices = {}
         if hasattr(broker, 'update_prices'):
             for symbol in self.symbols:
@@ -305,6 +317,10 @@ class TradingBot:
             if signal_data.get('action') not in ['buy', 'sell']:
                 continue
 
+            if emergency_active:
+                self._journal("order_blocked", {"symbol": symbol, "reason": "emergency_stop_active"})
+                continue
+
             if self.block_orders_when_market_closed and not market_open_now:
                 self._journal("order_blocked", {"symbol": symbol, "reason": "market_closed"})
                 continue
@@ -320,7 +336,6 @@ class TradingBot:
             except Exception:
                 position_size = 1
 
-            # Final live safety gate
             if self.broker_mode == "live" and not self.live_unlocked:
                 self._journal("order_blocked", {
                     "symbol": symbol,

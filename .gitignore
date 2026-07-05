@@ -9,3 +9,4 @@ data/
 state.json
 state.json.old
 .idea/
+runtime/
