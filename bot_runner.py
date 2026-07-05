@@ -1,4 +1,4 @@
-"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling + US market calendar guard"""
+"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling + live readiness gate"""
 import time
 import sys
 import os
@@ -12,12 +12,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from signal_generator.signal_engine import SignalEngine
 from utils.logger import setup_logger
 from utils.config import Config
+from utils.live_readiness import evaluate_live_readiness
 
 logger = setup_logger('bot_runner')
 
 
 def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
-    """weekday: Monday=0 ... Sunday=6, n: 1..5"""
     d = date(year, month, 1)
     shift = (weekday - d.weekday()) % 7
     d = d + timedelta(days=shift)
@@ -35,7 +35,6 @@ def last_weekday_of_month(year: int, month: int, weekday: int) -> date:
 
 
 def observed_us_holiday(d: date) -> date:
-    # Saturday -> Friday observed; Sunday -> Monday observed
     if d.weekday() == 5:
         return d - timedelta(days=1)
     if d.weekday() == 6:
@@ -44,7 +43,6 @@ def observed_us_holiday(d: date) -> date:
 
 
 def easter_sunday(year: int) -> date:
-    # Anonymous Gregorian algorithm
     a = year % 19
     b = year // 100
     c = year % 100
@@ -64,23 +62,16 @@ def easter_sunday(year: int) -> date:
 
 def nyse_holidays(year: int) -> set[date]:
     holidays = set()
-
-    # Fixed-date holidays (observed)
-    holidays.add(observed_us_holiday(date(year, 1, 1)))    # New Year's Day
-    holidays.add(observed_us_holiday(date(year, 6, 19)))   # Juneteenth
-    holidays.add(observed_us_holiday(date(year, 7, 4)))    # Independence Day
-    holidays.add(observed_us_holiday(date(year, 12, 25)))  # Christmas Day
-
-    # Floating holidays
-    holidays.add(nth_weekday_of_month(year, 1, 0, 3))      # MLK Day (3rd Mon Jan)
-    holidays.add(nth_weekday_of_month(year, 2, 0, 3))      # Presidents' Day (3rd Mon Feb)
-    holidays.add(last_weekday_of_month(year, 5, 0))        # Memorial Day (last Mon May)
-    holidays.add(nth_weekday_of_month(year, 9, 0, 1))      # Labor Day (1st Mon Sep)
-    holidays.add(nth_weekday_of_month(year, 11, 3, 4))     # Thanksgiving (4th Thu Nov)
-
-    # Good Friday
+    holidays.add(observed_us_holiday(date(year, 1, 1)))
+    holidays.add(observed_us_holiday(date(year, 6, 19)))
+    holidays.add(observed_us_holiday(date(year, 7, 4)))
+    holidays.add(observed_us_holiday(date(year, 12, 25)))
+    holidays.add(nth_weekday_of_month(year, 1, 0, 3))
+    holidays.add(nth_weekday_of_month(year, 2, 0, 3))
+    holidays.add(last_weekday_of_month(year, 5, 0))
+    holidays.add(nth_weekday_of_month(year, 9, 0, 1))
+    holidays.add(nth_weekday_of_month(year, 11, 3, 4))
     holidays.add(easter_sunday(year) - timedelta(days=2))
-
     return holidays
 
 
@@ -89,15 +80,12 @@ def is_us_market_open(include_holidays: bool = True) -> bool:
     now = datetime.now(ny)
     today = now.date()
 
-    # Weekend
-    if now.weekday() >= 5:  # Sat/Sun
+    if now.weekday() >= 5:
         return False
 
-    # Holidays
     if include_holidays and today in nyse_holidays(today.year):
         return False
 
-    # Regular session only: 09:30–16:00 ET
     market_open = datetime.strptime("09:30", "%H:%M").time()
     market_close = datetime.strptime("16:00", "%H:%M").time()
     return market_open <= now.time() <= market_close
@@ -114,19 +102,29 @@ class TradingBot:
 
         self.symbols = self.config.get('data.supported_pairs', ['AAPL'])
 
-        self.broker_mode = str(self.config.get('broker.mode', 'paper')).lower()  # paper | live
+        self.broker_mode = str(self.config.get('broker.mode', 'paper')).lower()
         self.allow_live = bool(self.config.get('broker.allow_live_trading', False))
 
-        self.max_daily_loss = float(self.config.get('trading.max_daily_loss', 0.02))
+        self.max_daily_loss = float(self.config.get('trading.max_daily_loss', 0.01))
         self.kill_switch_on_daily_loss = bool(self.config.get('trading.kill_switch_on_daily_loss', True))
-        self.max_open_positions = int(self.config.get('trading.max_open_positions', 5))
+        self.max_open_positions = int(self.config.get('trading.max_open_positions', 3))
         self.block_orders_when_market_closed = bool(
             self.config.get('trading.block_orders_when_market_closed', True)
         )
 
-        self.day_start_balance = None
         self.journal_path = self.config.get('trading.journal_path', 'journal/trades.jsonl')
         os.makedirs(os.path.dirname(self.journal_path), exist_ok=True)
+
+        # LIVE READINESS GATE
+        self.live_gate_enabled = bool(self.config.get('trading.live_readiness.enabled', True))
+        self.live_gate_min_closed_trades = int(self.config.get('trading.live_readiness.min_closed_trades', 30))
+        self.live_gate_lookback_days = int(self.config.get('trading.live_readiness.lookback_days', 30))
+        self.live_gate_min_profit_factor = float(self.config.get('trading.live_readiness.min_profit_factor', 1.20))
+        self.live_gate_max_drawdown = float(self.config.get('trading.live_readiness.max_drawdown', 0.05))
+        self.live_gate_min_win_rate = float(self.config.get('trading.live_readiness.min_win_rate', 0.40))
+        self.live_unlocked = False
+
+        self.day_start_balance = None
 
         signal.signal(signal.SIGINT, self.stop_bot)
         signal.signal(signal.SIGTERM, self.stop_bot)
@@ -154,9 +152,7 @@ class TradingBot:
 
         daily_drawdown = (self.day_start_balance - current_balance) / self.day_start_balance
         if daily_drawdown >= self.max_daily_loss:
-            logger.error(
-                f"🛑 Daily loss limit hit: {daily_drawdown:.2%} >= {self.max_daily_loss:.2%}. Trading halted."
-            )
+            logger.error(f"🛑 Daily loss limit hit: {daily_drawdown:.2%} >= {self.max_daily_loss:.2%}")
             self._journal("risk_halt", {
                 "reason": "daily_loss_limit",
                 "daily_drawdown": daily_drawdown,
@@ -171,19 +167,47 @@ class TradingBot:
         broker = self.engine.broker
         if hasattr(broker, 'get_positions'):
             try:
-                positions = broker.get_positions() or []
-                return len(positions)
+                return len(broker.get_positions() or [])
             except Exception:
                 return 0
         return 0
 
+    def _evaluate_live_gate(self):
+        if self.broker_mode != "live":
+            self.live_unlocked = True
+            return
+
+        if not self.live_gate_enabled:
+            self.live_unlocked = bool(self.allow_live)
+            return
+
+        result = evaluate_live_readiness(
+            journal_path=self.journal_path,
+            min_closed_trades=self.live_gate_min_closed_trades,
+            lookback_days=self.live_gate_lookback_days,
+            min_profit_factor=self.live_gate_min_profit_factor,
+            max_drawdown_limit=self.live_gate_max_drawdown,
+            min_win_rate=self.live_gate_min_win_rate,
+        )
+
+        self.live_unlocked = bool(self.allow_live and result.ready)
+
+        logger.info(
+            f"🔐 Live readiness: ready={result.ready} | unlocked={self.live_unlocked} | "
+            f"reason={result.reason} | stats={result.stats}"
+        )
+
+        self._journal("live_readiness_check", {
+            "ready": result.ready,
+            "unlocked": self.live_unlocked,
+            "reason": result.reason,
+            "stats": result.stats,
+            "sample_size": result.sample_size
+        })
+
     def start(self):
         logger.info("🤖 Trading Bot Starting (Safe Mode)...")
         self.is_running = True
-
-        if self.broker_mode == "live" and not self.allow_live:
-            logger.error("❌ LIVE mode requested but allow_live_trading=false. Refusing to start.")
-            return
 
         broker = self.engine.broker
         if hasattr(broker, 'connect'):
@@ -196,9 +220,13 @@ class TradingBot:
             logger.info(f"✅ Connected to broker. Start balance: ${start_balance:.2f}")
             self._journal("bot_start", {"start_balance": start_balance, "symbols": self.symbols})
 
+        self._evaluate_live_gate()
+
+        if self.broker_mode == "live" and not self.live_unlocked:
+            logger.error("❌ LIVE mode blocked by readiness gate or allow_live_trading=false.")
+
         logger.info(f"📡 Scanning symbols: {self.symbols}")
-        logger.info(f"⏱️ Scan interval: {self.scan_interval} seconds")
-        logger.info(f"🧪 Broker mode: {self.broker_mode}")
+        logger.info(f"⏱️ Scan interval: {self.scan_interval}s | mode={self.broker_mode}")
 
         while self.is_running:
             try:
@@ -223,9 +251,9 @@ class TradingBot:
                     price = self.engine.market_data.get_current_price(symbol)
                     if price is not None and float(price) > 0:
                         current_prices[symbol] = float(price)
-                        logger.info(f"💹 {symbol} current price: ${float(price):.2f}")
+                        logger.info(f"💹 {symbol}: ${float(price):.2f}")
                 except Exception as e:
-                    logger.warning(f"Could not get price for {symbol}: {e}")
+                    logger.warning(f"Price fetch failed for {symbol}: {e}")
 
             if current_prices:
                 broker.update_prices(current_prices)
@@ -233,24 +261,20 @@ class TradingBot:
                 if hasattr(broker, 'update_trailing_stops'):
                     moved = broker.update_trailing_stops(current_prices)
                     if moved:
-                        logger.info(f"🎯 Trailing stops moved: {len(moved)} positions")
                         self._journal("trailing_update", {"count": len(moved), "moves": moved})
 
                 if hasattr(broker, 'check_stop_loss_take_profit'):
                     closed = broker.check_stop_loss_take_profit(current_prices)
                     for sym, reason, pnl in closed:
-                        logger.info(f"🔔 Position closed: {sym} ({reason}) P&L=${float(pnl):.2f}")
                         self._journal("position_closed", {
-                            "symbol": sym,
-                            "reason": reason,
-                            "pnl": float(pnl)
+                            "symbol": sym, "reason": reason, "pnl": float(pnl)
                         })
 
         current_balance = broker.get_balance()
         if hasattr(broker, 'update_balance'):
             current_balance = broker.update_balance()
 
-        logger.info(f"💰 Current Balance: ${float(current_balance):.2f}")
+        logger.info(f"💰 Balance: ${float(current_balance):.2f}")
         self._journal("balance", {"balance": float(current_balance)})
 
         if self.kill_switch_on_daily_loss and self._is_daily_loss_exceeded(float(current_balance)):
@@ -262,57 +286,47 @@ class TradingBot:
 
         market_open_now = is_us_market_open(include_holidays=True)
         if self.block_orders_when_market_closed and not market_open_now:
-            logger.info("🕒 US market is currently CLOSED (weekend/holiday/outside session). New orders will be blocked.")
+            logger.info("🕒 US market CLOSED. New orders blocked.")
 
         for symbol in self.symbols:
             if not self.is_running:
                 break
 
-            logger.info(f"🔍 Analyzing {symbol}...")
-
             try:
                 signal_data = self.engine.generate_signal(symbol, force_test_mode=False)
                 action = signal_data.get('action', 'hold')
                 rsi = signal_data.get('rsi', 'N/A')
-                logger.info(f"Signal for {symbol}: {action} (RSI: {rsi})")
+                logger.info(f"{symbol} signal={action} rsi={rsi}")
                 self._journal("signal", {"symbol": symbol, "action": action, "rsi": rsi})
             except Exception as e:
-                logger.error(f"Error generating signal for {symbol}: {e}")
                 self._journal("signal_error", {"symbol": symbol, "error": str(e)})
                 continue
 
             if signal_data.get('action') not in ['buy', 'sell']:
-                logger.info(f"⏸️ {symbol}: HOLD")
                 continue
 
             if self.block_orders_when_market_closed and not market_open_now:
-                logger.warning(f"🕒 Market closed. Skipping order for {symbol}.")
                 self._journal("order_blocked", {"symbol": symbol, "reason": "market_closed"})
                 continue
 
-            # Max open positions guard
             open_positions = self._open_positions_count()
             if open_positions >= self.max_open_positions:
-                logger.warning(f"🚫 Max open positions reached ({open_positions}). Skipping {symbol}.")
-                self._journal("order_blocked", {
-                    "symbol": symbol,
-                    "reason": "max_open_positions",
-                    "open_positions": open_positions,
-                    "max_open_positions": self.max_open_positions
-                })
+                self._journal("order_blocked", {"symbol": symbol, "reason": "max_open_positions"})
                 continue
 
             position_size = signal_data.get('position_size', 1)
             try:
-                position_size = int(float(position_size))
+                position_size = max(1, int(float(position_size)))
             except Exception:
                 position_size = 1
-            if position_size <= 0:
-                position_size = 1
 
-            if self.broker_mode == "live" and not self.allow_live:
-                logger.warning(f"🚫 Live order blocked by policy: {symbol}")
-                self._journal("order_blocked", {"symbol": symbol, "reason": "live_not_allowed"})
+            # Final live safety gate
+            if self.broker_mode == "live" and not self.live_unlocked:
+                self._journal("order_blocked", {
+                    "symbol": symbol,
+                    "reason": "live_readiness_gate_locked"
+                })
+                logger.warning(f"🔒 Live blocked for {symbol}: readiness gate locked.")
                 continue
 
             if hasattr(broker, 'place_order'):
@@ -328,7 +342,6 @@ class TradingBot:
                     )
 
                     if success:
-                        logger.info(f"✅ Trade Executed for {symbol}")
                         self._journal("order_executed", {
                             "symbol": symbol,
                             "action": signal_data['action'],
@@ -339,10 +352,11 @@ class TradingBot:
                             "atr": signal_data.get('atr')
                         })
                     else:
-                        logger.error(f"❌ Failed to execute trade for {symbol}")
-                        self._journal("order_failed", {"symbol": symbol, "action": signal_data['action']})
+                        self._journal("order_failed", {
+                            "symbol": symbol,
+                            "action": signal_data['action']
+                        })
                 except Exception as e:
-                    logger.error(f"Order execution error for {symbol}: {e}")
                     self._journal("order_error", {"symbol": symbol, "error": str(e)})
 
     def stop_bot(self, signum, frame):

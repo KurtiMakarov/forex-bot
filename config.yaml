@@ -1,13 +1,12 @@
 app:
   name: "Stocks Trading AI"
-  version: "4.2.0"
+  version: "4.3.0"
   debug: false
 
 broker:
-  # paper_trader | ibkr
-  type: "paper_trader"
-  mode: "paper"                    # paper | live
-  allow_live_trading: false
+  type: "paper_trader"          # paper_trader | ibkr
+  mode: "paper"                 # paper | live
+  allow_live_trading: false     # must be true + readiness pass for live unlock
   ib_host: "127.0.0.1"
   ib_port: 7497
   ib_client_id: 1
@@ -30,15 +29,23 @@ data:
   historical_days: 100
 
 trading:
-  risk_per_trade: 0.005            # 0.5%
-  max_daily_loss: 0.02             # 2%
-  max_position_pct: 0.05           # max 5% of balance in one position
+  risk_per_trade: 0.0025
+  max_daily_loss: 0.01
+  max_position_pct: 0.03
   min_confidence: 0.65
-  max_open_positions: 5
+  max_open_positions: 3
   kill_switch_on_daily_loss: true
   scan_interval_seconds: 60
   journal_path: "journal/trades.jsonl"
   block_orders_when_market_closed: true
+
+  live_readiness:
+    enabled: true
+    min_closed_trades: 30
+    lookback_days: 30
+    min_profit_factor: 1.20
+    max_drawdown: 0.05
+    min_win_rate: 0.40
 
 telegram:
   token: "${TELEGRAM_TOKEN}"
