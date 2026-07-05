@@ -1,10 +1,10 @@
-"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling"""
+"""Autonomous Trading Bot Runner - Stocks with safety guardrails + journaling + US market calendar guard"""
 import time
 import sys
 import os
 import signal
 import json
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import pytz
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -16,20 +16,91 @@ from utils.config import Config
 logger = setup_logger('bot_runner')
 
 
-def is_us_market_open() -> bool:
+def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    """weekday: Monday=0 ... Sunday=6, n: 1..5"""
+    d = date(year, month, 1)
+    shift = (weekday - d.weekday()) % 7
+    d = d + timedelta(days=shift)
+    d = d + timedelta(weeks=n - 1)
+    return d
+
+
+def last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        d = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        d = date(year, month + 1, 1) - timedelta(days=1)
+    shift = (d.weekday() - weekday) % 7
+    return d - timedelta(days=shift)
+
+
+def observed_us_holiday(d: date) -> date:
+    # Saturday -> Friday observed; Sunday -> Monday observed
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def easter_sunday(year: int) -> date:
+    # Anonymous Gregorian algorithm
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def nyse_holidays(year: int) -> set[date]:
+    holidays = set()
+
+    # Fixed-date holidays (observed)
+    holidays.add(observed_us_holiday(date(year, 1, 1)))    # New Year's Day
+    holidays.add(observed_us_holiday(date(year, 6, 19)))   # Juneteenth
+    holidays.add(observed_us_holiday(date(year, 7, 4)))    # Independence Day
+    holidays.add(observed_us_holiday(date(year, 12, 25)))  # Christmas Day
+
+    # Floating holidays
+    holidays.add(nth_weekday_of_month(year, 1, 0, 3))      # MLK Day (3rd Mon Jan)
+    holidays.add(nth_weekday_of_month(year, 2, 0, 3))      # Presidents' Day (3rd Mon Feb)
+    holidays.add(last_weekday_of_month(year, 5, 0))        # Memorial Day (last Mon May)
+    holidays.add(nth_weekday_of_month(year, 9, 0, 1))      # Labor Day (1st Mon Sep)
+    holidays.add(nth_weekday_of_month(year, 11, 3, 4))     # Thanksgiving (4th Thu Nov)
+
+    # Good Friday
+    holidays.add(easter_sunday(year) - timedelta(days=2))
+
+    return holidays
+
+
+def is_us_market_open(include_holidays: bool = True) -> bool:
     ny = pytz.timezone("America/New_York")
     now = datetime.now(ny)
+    today = now.date()
 
     # Weekend
-    if now.weekday() >= 5:  # 5=Sat, 6=Sun
+    if now.weekday() >= 5:  # Sat/Sun
         return False
 
-    # Regular session 09:30–16:00 ET
+    # Holidays
+    if include_holidays and today in nyse_holidays(today.year):
+        return False
+
+    # Regular session only: 09:30–16:00 ET
     market_open = datetime.strptime("09:30", "%H:%M").time()
     market_close = datetime.strptime("16:00", "%H:%M").time()
-    t = now.time()
-
-    return market_open <= t <= market_close
+    return market_open <= now.time() <= market_close
 
 
 class TradingBot:
@@ -49,6 +120,9 @@ class TradingBot:
         self.max_daily_loss = float(self.config.get('trading.max_daily_loss', 0.02))
         self.kill_switch_on_daily_loss = bool(self.config.get('trading.kill_switch_on_daily_loss', True))
         self.max_open_positions = int(self.config.get('trading.max_open_positions', 5))
+        self.block_orders_when_market_closed = bool(
+            self.config.get('trading.block_orders_when_market_closed', True)
+        )
 
         self.day_start_balance = None
         self.journal_path = self.config.get('trading.journal_path', 'journal/trades.jsonl')
@@ -186,9 +260,9 @@ class TradingBot:
         open_positions = self._open_positions_count()
         logger.info(f"📌 Open positions: {open_positions}/{self.max_open_positions}")
 
-        market_open_now = is_us_market_open()
-        if not market_open_now:
-            logger.info("🕒 US market is currently CLOSED. New orders will be blocked this cycle.")
+        market_open_now = is_us_market_open(include_holidays=True)
+        if self.block_orders_when_market_closed and not market_open_now:
+            logger.info("🕒 US market is currently CLOSED (weekend/holiday/outside session). New orders will be blocked.")
 
         for symbol in self.symbols:
             if not self.is_running:
@@ -211,7 +285,7 @@ class TradingBot:
                 logger.info(f"⏸️ {symbol}: HOLD")
                 continue
 
-            if not market_open_now:
+            if self.block_orders_when_market_closed and not market_open_now:
                 logger.warning(f"🕒 Market closed. Skipping order for {symbol}.")
                 self._journal("order_blocked", {"symbol": symbol, "reason": "market_closed"})
                 continue

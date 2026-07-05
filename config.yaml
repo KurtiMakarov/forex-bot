@@ -38,6 +38,7 @@ trading:
   kill_switch_on_daily_loss: true
   scan_interval_seconds: 60
   journal_path: "journal/trades.jsonl"
+  block_orders_when_market_closed: true
 
 telegram:
   token: "${TELEGRAM_TOKEN}"
