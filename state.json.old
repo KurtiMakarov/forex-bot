@@ -1,0 +1,113 @@
+{
+  "balance": 5705.932178497314,
+  "initial_balance": 10000,
+  "account_id": "PAPER-001",
+  "positions": {
+    "EURUSD": {
+      "symbol": "EURUSD",
+      "action": "BUY",
+      "quantity": 0.15,
+      "entry_price": 1.1469204425811768,
+      "stop_loss": 1.13316,
+      "take_profit": 1.17444,
+      "margin_used": 344.076132774353,
+      "opened_at": "2026-06-20T11:58:59.865899",
+      "status": "OPEN"
+    },
+    "USDCAD": {
+      "symbol": "USDCAD",
+      "action": "SELL",
+      "quantity": 0.16,
+      "entry_price": 1.4151999950408936,
+      "stop_loss": 1.42757,
+      "take_profit": 1.39046,
+      "margin_used": 452.86399841308594,
+      "opened_at": "2026-06-20T11:59:13.881377",
+      "status": "OPEN"
+    },
+    "GBPUSD": {
+      "symbol": "GBPUSD",
+      "action": "BUY",
+      "quantity": 0.1,
+      "entry_price": 1.321038842201233,
+      "stop_loss": 1.30309,
+      "take_profit": 1.35693,
+      "margin_used": 264.2077684402466,
+      "opened_at": "2026-06-22T08:09:04.652345",
+      "status": "OPEN"
+    },
+    "USDJPY": {
+      "symbol": "USDJPY",
+      "action": "SELL",
+      "quantity": 0.01,
+      "entry_price": 161.64599609375,
+      "stop_loss": 162.37631,
+      "take_profit": 159.11438,
+      "margin_used": 3232.919921875,
+      "opened_at": "2026-06-22T08:35:27.611091",
+      "status": "OPEN"
+    }
+  },
+  "trades_history": [
+    {
+      "id": 1,
+      "symbol": "EURUSD",
+      "action": "BUY",
+      "quantity": 0.15,
+      "entry_price": 1.1469204425811768,
+      "stop_loss": 1.13316,
+      "take_profit": 1.17444,
+      "margin_used": 344.076132774353,
+      "timestamp": "2026-06-20T11:58:59.865936",
+      "status": "OPEN",
+      "pnl": 0.0
+    },
+    {
+      "id": 2,
+      "symbol": "USDCAD",
+      "action": "SELL",
+      "quantity": 0.16,
+      "entry_price": 1.4151999950408936,
+      "stop_loss": 1.42757,
+      "take_profit": 1.39046,
+      "margin_used": 452.86399841308594,
+      "timestamp": "2026-06-20T11:59:13.881411",
+      "status": "OPEN",
+      "pnl": 0.0
+    },
+    {
+      "id": 3,
+      "symbol": "GBPUSD",
+      "action": "BUY",
+      "quantity": 0.1,
+      "entry_price": 1.321038842201233,
+      "stop_loss": 1.30309,
+      "take_profit": 1.35693,
+      "margin_used": 264.2077684402466,
+      "timestamp": "2026-06-22T08:09:04.652375",
+      "status": "OPEN",
+      "pnl": 0.0
+    },
+    {
+      "id": 4,
+      "symbol": "USDJPY",
+      "action": "SELL",
+      "quantity": 0.01,
+      "entry_price": 161.64599609375,
+      "stop_loss": 162.37631,
+      "take_profit": 159.11438,
+      "margin_used": 3232.919921875,
+      "timestamp": "2026-06-22T08:35:27.611106",
+      "status": "OPEN",
+      "pnl": 0.0
+    }
+  ],
+  "last_prices": {
+    "EURUSD": 1.1461317539215088,
+    "GBPUSD": 1.3211610317230225,
+    "USDJPY": 161.64100646972656,
+    "AUDUSD": 0.7005254030227661,
+    "USDCAD": 1.418869972229004
+  },
+  "last_updated": "2026-06-22T09:30:13.608203"
+}

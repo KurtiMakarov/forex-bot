@@ -1,0 +1,57 @@
+app:
+  name: "Stocks Trading AI"
+  version: "4.0.0"
+  debug: false
+
+broker:
+  type: "paper_trader"
+  ib_host: "127.0.0.1"
+  ib_port: 7497
+  ib_client_id: 1
+
+# 13 АКЦИИ ОТ РАЗЛИЧНИ СЕКТОРИ
+data:
+  supported_pairs:
+    # Технологични (5)
+    - "AAPL"
+    - "MSFT"
+    - "GOOGL"
+    - "TSLA"
+    - "NVDA"
+    # E-commerce & Social (2)
+    - "AMZN"
+    - "META"
+    # Финансови (2)
+    - "JPM"
+    - "V"
+    # Здравеопазване (2)
+    - "JNJ"
+    - "UNH"
+    # Енергия (2)
+    - "XOM"
+    - "CVX"
+  historical_days: 100
+
+trading:
+  risk_per_trade: 0.02
+  max_daily_loss: 0.05
+  min_confidence: 0.65
+  max_open_positions: 5
+
+telegram:
+  token: "8857498820:AAHiKTrqUOvuiq-2y_5GecwkiNapToa_lY4"
+  chat_id: "896074085"
+
+api_keys:
+  news_api: ""
+  alpha_vantage: ""
+
+strategies:
+  enabled:
+    - "trend_following"
+    - "mean_reversion"
+    - "breakout"
+  weights:
+    trend_following: 0.4
+    mean_reversion: 0.3
+    breakout: 0.3
