@@ -1,12 +1,12 @@
 app:
   name: "Stocks Trading AI"
-  version: "4.1.0"
+  version: "4.2.0"
   debug: false
 
 broker:
   # paper_trader | ibkr
   type: "paper_trader"
-  mode: "paper"           # paper | live
+  mode: "paper"                    # paper | live
   allow_live_trading: false
   ib_host: "127.0.0.1"
   ib_port: 7497
@@ -30,15 +30,17 @@ data:
   historical_days: 100
 
 trading:
-  # намаляваме началния риск за тестов период
-  risk_per_trade: 0.005       # 0.5%
-  max_daily_loss: 0.02        # 2%
+  risk_per_trade: 0.005            # 0.5%
+  max_daily_loss: 0.02             # 2%
+  max_position_pct: 0.05           # max 5% of balance in one position
   min_confidence: 0.65
   max_open_positions: 5
   kill_switch_on_daily_loss: true
+  scan_interval_seconds: 60
+  journal_path: "journal/trades.jsonl"
 
 telegram:
-  token: "${TELEGRAM_TOKEN}"  # никога реален token в git
+  token: "${TELEGRAM_TOKEN}"
   chat_id: "${TELEGRAM_CHAT_ID}"
 
 api_keys:
