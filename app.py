@@ -1,333 +1,263 @@
-"""Web Dashboard for Stocks Trading Bot - Fixed version"""
-import streamlit as st
-import sys
 import os
 import json
-import math
-from datetime import datetime
+from datetime import datetime, timezone
+import streamlit as st
+import pandas as pd
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from utils.live_readiness import evaluate_live_readiness
+except Exception:
+    evaluate_live_readiness = None
 
-st.set_page_config(
-    page_title="📊 Stocks AI Dashboard",
-    layout="wide",
-    page_icon="📈"
-)
+st.set_page_config(page_title="Stocks AI Dashboard", page_icon="📊", layout="wide")
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state.json')
+JOURNAL_PATH = "journal/trades.jsonl"
+STATE_PATH = "state.json"
+EMERGENCY_STOP_FILE = "runtime/EMERGENCY_STOP"
 
 
-def safe_float(value, default=0.0):
-    """Safely convert value to float"""
-    if value is None:
-        return default
+def _safe_float(x, default=0.0):
     try:
-        val = float(value)
-        if math.isnan(val) or math.isinf(val):
-            return default
-        return val
-    except (TypeError, ValueError):
+        return float(x)
+    except Exception:
         return default
 
 
-def format_price(value):
-    """Format price for display"""
-    val = safe_float(value, 0.0)
-    if val <= 0:
-        return "N/A"
-    return f"${val:.2f}"
-
-
-def load_state():
-    """Load state from JSON file"""
-    if not os.path.exists(STATE_FILE):
+def _parse_ts(ts):
+    try:
+        if isinstance(ts, str) and ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return datetime.fromisoformat(ts).astimezone(timezone.utc)
+    except Exception:
         return None
+
+
+@st.cache_data(ttl=5)
+def load_journal(path: str):
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    return rows
+
+
+@st.cache_data(ttl=5)
+def load_state(path: str):
+    if not os.path.exists(path):
+        return {}
     try:
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        st.error(f"Грешка при зареждане на state.json: {e}")
-        return None
+    except Exception:
+        return {}
 
 
-# ===== ИНИЦИАЛИЗАЦИЯ =====
-if 'auto_refresh' not in st.session_state:
-    st.session_state.auto_refresh = False
+def derive_metrics(journal_rows):
+    balance = 0.0
+    closed_trades = 0
+    realized_pnl = 0.0
+    wins, losses = 0, 0
+    open_symbols = set()
+    last_ts = None
 
-# ===== ЗАГЛАВИЕ =====
-st.title("📊 Stocks AI Trading Dashboard")
-st.markdown("---")
+    for r in journal_rows:
+        ts = _parse_ts(r.get("ts"))
+        if ts and (last_ts is None or ts > last_ts):
+            last_ts = ts
 
-# ===== БУТОНИ =====
-btn_col1, btn_col2 = st.columns(2)
+        et = r.get("event_type")
+        if et == "balance":
+            balance = _safe_float(r.get("balance"), balance)
+        elif et == "order_executed":
+            sym = r.get("symbol")
+            if sym:
+                open_symbols.add(sym)
+        elif et == "position_closed":
+            sym = r.get("symbol")
+            if sym in open_symbols:
+                open_symbols.remove(sym)
+            pnl = _safe_float(r.get("pnl"))
+            realized_pnl += pnl
+            closed_trades += 1
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
 
-with btn_col1:
-    if st.button("🔄 Обнови Сега", use_container_width=True, type="primary"):
-        st.rerun()
+    wr = (wins / (wins + losses)) if (wins + losses) > 0 else 0.0
+    return {
+        "balance": balance,
+        "open_positions": len(open_symbols),
+        "closed_trades": closed_trades,
+        "realized_pnl": realized_pnl,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wr,
+        "last_ts": last_ts.isoformat() if last_ts else "N/A",
+    }
 
-with btn_col2:
-    if st.session_state.auto_refresh:
-        if st.button("⏸️ Спри Авто-Обновяване", use_container_width=True, type="secondary"):
-            st.session_state.auto_refresh = False
+
+def get_live_readiness_result():
+    if evaluate_live_readiness is None:
+        return None, "utils/live_readiness.py липсва"
+
+    if not os.path.exists(JOURNAL_PATH):
+        return None, f"Липсва journal: {JOURNAL_PATH}"
+
+    result = evaluate_live_readiness(
+        journal_path=JOURNAL_PATH,
+        min_closed_trades=30,
+        lookback_days=30,
+        min_profit_factor=1.20,
+        max_drawdown_limit=0.05,
+        min_win_rate=0.40
+    )
+    return result, None
+
+
+def ensure_runtime_dir():
+    os.makedirs("runtime", exist_ok=True)
+
+
+def emergency_is_active():
+    return os.path.exists(EMERGENCY_STOP_FILE)
+
+
+def set_emergency_stop(active: bool):
+    ensure_runtime_dir()
+    if active:
+        with open(EMERGENCY_STOP_FILE, "w", encoding="utf-8") as f:
+            f.write(datetime.utcnow().isoformat() + "Z")
+    else:
+        if os.path.exists(EMERGENCY_STOP_FILE):
+            os.remove(EMERGENCY_STOP_FILE)
+
+
+def show_top_safety_banner(readiness_result):
+    if emergency_is_active():
+        st.error("🛑 EMERGENCY STOP ACTIVE — trading трябва да е блокиран.")
+        return
+
+    if readiness_result is None:
+        st.warning("⚠️ LIVE readiness status unknown.")
+        return
+
+    if readiness_result.ready:
+        st.success("✅ LIVE READY (по KPI). Въпреки това остави allow_live_trading=false, докато не решиш.")
+    else:
+        st.error("🔒 LIVE LOCKED — условията за live не са покрити.")
+
+
+def show_live_readiness(readiness_result, readiness_err):
+    st.subheader("🔐 Live Readiness")
+
+    if readiness_err:
+        st.warning(readiness_err)
+        return
+
+    if readiness_result.ready:
+        st.success("✅ READY for live")
+    else:
+        st.error("🔒 NOT READY for live")
+
+    st.caption(readiness_result.reason)
+    stats = readiness_result.stats or {}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Closed Trades", int(stats.get("closed_trades", readiness_result.sample_size or 0)))
+    c2.metric("Profit Factor", f"{stats.get('profit_factor', 0.0):.2f}")
+    c3.metric("Max Drawdown", f"{stats.get('max_drawdown', 0.0)*100:.2f}%")
+    c4.metric("Win Rate", f"{stats.get('win_rate', 0.0)*100:.2f}%")
+
+
+def show_emergency_controls():
+    st.subheader("🧯 Emergency Controls")
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if st.button("🛑 ACTIVATE EMERGENCY STOP", use_container_width=True):
+            set_emergency_stop(True)
+            st.success("Emergency stop ACTIVATED")
             st.rerun()
-    else:
-        if st.button("▶️ Авто Обновяване (10сек)", use_container_width=True):
-            st.session_state.auto_refresh = True
+
+    with c2:
+        if st.button("✅ CLEAR EMERGENCY STOP", use_container_width=True):
+            set_emergency_stop(False)
+            st.success("Emergency stop CLEARED")
             st.rerun()
 
-st.markdown("---")
+    st.caption(f"Флаг файл: `{EMERGENCY_STOP_FILE}` | active={emergency_is_active()}")
 
-# ===== ЗАРЕЖДАНЕ НА ДАННИ =====
-state = load_state()
 
-if state is None:
-    st.error("❌ Ботът не е стартиран или няма запазено състояние!")
-    st.info("""
-    💡 **Какво да направиш:**
-    1. Отвори терминал
-    2. `cd /Users/svetoslvstefnov/Desktop/SwiftUI/Форекс`
-    3. `python bot_runner.py`
-    4. Изчакай 1 минута и натисни 'Обнови Сега'
-    """)
-    st.stop()
+def main():
+    st.title("📊 Stocks AI Trading Dashboard")
+    st.markdown("---")
 
-# ===== ИЗВЛИЧАНЕ НА ДАННИ =====
-balance = safe_float(state.get('balance', 0), 0.0)
-initial_balance = safe_float(state.get('initial_balance', 10000), 10000)
-positions = state.get('positions', {})
-trades_history = state.get('trades_history', [])
-last_updated = state.get('last_updated', 'Never')
-last_prices = state.get('last_prices', {})
+    readiness_result, readiness_err = get_live_readiness_result()
+    show_top_safety_banner(readiness_result)
 
-# Филтриране на затворени сделки
-closed_trades = [t for t in trades_history if t.get('status') == 'CLOSED']
-open_trades = [t for t in trades_history if t.get('status') == 'OPEN']
+    cbtn1, cbtn2 = st.columns(2)
+    with cbtn1:
+        if st.button("🔄 Обнови Сега", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    with cbtn2:
+        pause_auto = st.toggle("⏸️ Спри Авто-Обновяване", value=False)
 
-# Изчисляване на P&L
-total_closed_pnl = sum(safe_float(t.get('pnl', 0), 0.0) for t in closed_trades)
-total_unrealized_pnl = sum(
-    safe_float(p.get('unrealized_pnl', 0), 0.0)
-    for p in [
-        {**pos, 'unrealized_pnl': (safe_float(last_prices.get(pos['symbol'], 0), 0) - safe_float(pos.get('entry_price', 0), 0)) * safe_float(pos.get('quantity', 0), 0)}
-        for pos in positions.values()
-    ]
-)
-total_pnl = total_closed_pnl + total_unrealized_pnl
+    journal_rows = load_journal(JOURNAL_PATH)
+    state = load_state(STATE_PATH)
+    m = derive_metrics(journal_rows)
 
-# Win Rate
-winning_trades = [t for t in closed_trades if safe_float(t.get('pnl', 0), 0) > 0]
-losing_trades = [t for t in closed_trades if safe_float(t.get('pnl', 0), 0) < 0]
-win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
-
-# ===== СТАТУС =====
-if st.session_state.auto_refresh:
-    st.success(f"✅ Ботът е активен | 🔄 Автоматично обновяване ВКЛЮЧЕНО | Последно: {last_updated}")
-else:
-    st.success(f"✅ Ботът е активен | Последно обновяване: {last_updated}")
-
-# ===== МЕТРИКИ =====
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    st.metric(
-        "💰 Баланс",
-        f"${balance:.2f}",
-        delta=f"${balance - initial_balance:+.2f}"
+    st.success(
+        f"✅ Ботът е активен | {'⏸️ Авто-обновяване ИЗКЛЮЧЕНО' if pause_auto else '🔄 Авто-обновяване ВКЛЮЧЕНО'} | Последно: {m['last_ts']}"
     )
 
-with col2:
-    st.metric("📊 Отворени позиции", len(positions))
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("💰 Баланс", f"${m['balance']:.2f}")
+    c2.metric("📊 Отворени позиции", f"{m['open_positions']}")
+    c3.metric("📜 Затворени сделки", f"{m['closed_trades']}")
+    c4.metric("📈 Реализиран P&L", f"${m['realized_pnl']:.2f}")
+    c5.metric("🎯 Win Rate", f"{m['win_rate']*100:.1f}% ({m['wins']}W/{m['losses']}L)")
 
-with col3:
-    st.metric("📜 Затворени сделки", len(closed_trades))
+    st.markdown("---")
+    show_live_readiness(readiness_result, readiness_err)
 
-with col4:
-    pnl_delta = f"${total_closed_pnl:+.2f}" if total_closed_pnl != 0 else None
-    st.metric(
-        "📈 Реализиран P&L",
-        f"${total_closed_pnl:.2f}",
-        delta=pnl_delta
-    )
+    st.markdown("---")
+    show_emergency_controls()
 
-with col5:
-    st.metric(
-        "🎯 Win Rate",
-        f"{win_rate:.1f}%",
-        delta=f"{len(winning_trades)}W / {len(losing_trades)}L"
-    )
+    st.markdown("---")
+    tab1, tab2, tab3 = st.tabs(["📜 Journal", "📂 State", "📈 PnL Curve"])
 
-st.markdown("---")
+    with tab1:
+        if journal_rows:
+            st.dataframe(pd.DataFrame(journal_rows[-200:]), use_container_width=True)
+        else:
+            st.info("Няма journal записи.")
 
-# ===== ТАБОВЕ =====
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Отворени Позиции",
-    "📜 История на Сделки",
-    "💹 Текущи Цени",
-    "📈 Статистика"
-])
+    with tab2:
+        st.json(state if state else {"info": "state.json не е наличен/празен"})
 
-# ===== ТАБ 1: ОТВОРЕНИ ПОЗИЦИИ =====
-with tab1:
-    st.subheader("📊 Отворени Позиции")
+    with tab3:
+        closed = [r for r in journal_rows if r.get("event_type") == "position_closed"]
+        if not closed:
+            st.info("Няма затворени сделки.")
+        else:
+            df = pd.DataFrame(closed)
+            df["pnl"] = pd.to_numeric(df.get("pnl", 0), errors="coerce").fillna(0.0)
+            df["cum_pnl"] = df["pnl"].cumsum()
+            st.line_chart(df["cum_pnl"])
+            st.dataframe(df.tail(200), use_container_width=True)
 
-    if not positions:
-        st.info("ℹ️ Няма отворени позиции в момента.")
-    else:
-        for symbol, pos in positions.items():
-            current_price = safe_float(last_prices.get(symbol, 0), 0)
-            entry_price = safe_float(pos.get('entry_price', 0), 0)
-            quantity = safe_float(pos.get('quantity', 0), 0)
-            action = pos.get('action', 'BUY')
+    if not pause_auto:
+        st.caption("Обновяване на всеки 5 сек (натисни Refresh/Rerun при нужда).")
 
-            if current_price <= 0 or entry_price <= 0:
-                unrealized_pnl = 0.0
-            elif action == 'BUY':
-                unrealized_pnl = (current_price - entry_price) * quantity
-            else:
-                unrealized_pnl = (entry_price - current_price) * quantity
 
-            emoji = '🟢' if action == 'BUY' else '🔴'
-            pnl_emoji = '📈' if unrealized_pnl >= 0 else '📉'
-            pnl_color = 'green' if unrealized_pnl >= 0 else 'red'
-
-            with st.expander(f"{emoji} {symbol} - {action} {quantity} @ {format_price(entry_price)}", expanded=True):
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.write(f"**Действие:** {action}")
-                    st.write(f"**Влязъл на:** {pos.get('opened_at', 'N/A')}")
-                    st.write(f"**Количество:** {quantity}")
-                    st.write(f"**Входна цена:** {format_price(entry_price)}")
-
-                with col2:
-                    st.metric("Текуща цена", format_price(current_price))
-                    st.metric(
-                        f"{pnl_emoji} P&L",
-                        f"${unrealized_pnl:.2f}",
-                        delta=f"${unrealized_pnl:+.2f}"
-                    )
-                    st.write(f"**Стоп Лос:** {format_price(pos.get('stop_loss', 0))}")
-                    st.write(f"**Тейк Профит:** {format_price(pos.get('take_profit', 0))}")
-
-# ===== ТАБ 2: ИСТОРИЯ НА СДЕЛКИ =====
-with tab2:
-    st.subheader("📜 История на Сделки")
-
-    if not closed_trades:
-        st.info("ℹ️ Няма затворени сделки.")
-    else:
-        # Обща статистика
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            pnl_class = "positive" if total_closed_pnl >= 0 else "negative"
-            st.metric("💵 Общ P&L", f"${total_closed_pnl:.2f}")
-
-        with col2:
-            st.metric("🏆 Печеливши", len(winning_trades))
-
-        with col3:
-            st.metric("💔 Загубени", len(losing_trades))
-
-        st.markdown("---")
-
-        # Списък със затворени сделки
-        for trade in reversed(closed_trades):
-            pnl = safe_float(trade.get('pnl', 0), 0.0)
-            symbol = trade.get('symbol', 'N/A')
-            action = trade.get('action', 'N/A')
-            entry_price = safe_float(trade.get('entry_price', 0), 0.0)
-            exit_price = safe_float(trade.get('exit_price', 0), 0.0)
-            quantity = safe_float(trade.get('quantity', 0), 0.0)
-
-            emoji = "✅" if pnl >= 0 else "❌"
-            pnl_emoji = "📈" if pnl >= 0 else "📉"
-
-            with st.expander(f"{emoji} #{trade.get('id', 0)} - {symbol} {action} | P&L: ${pnl:+.2f}"):
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.write(f"**Акция:** {symbol}")
-                    st.write(f"**Действие:** {action}")
-                    st.write(f"**Количество:** {quantity}")
-                    st.write(f"**Входна цена:** {format_price(entry_price)}")
-
-                with col2:
-                    st.write(f"**Изходна цена:** {format_price(exit_price)}")
-                    st.write(f"**Затворена на:** {trade.get('closed_at', 'N/A')}")
-                    st.metric(f"{pnl_emoji} P&L", f"${pnl:.2f}", delta=f"${pnl:+.2f}")
-
-                    if pnl >= 0:
-                        st.success(f"✅ Печалба: ${pnl:.2f}")
-                    else:
-                        st.error(f"❌ Загуба: ${abs(pnl):.2f}")
-
-# ===== ТАБ 3: ТЕКУЩИ ЦЕНИ =====
-with tab3:
-    st.subheader("💹 Текущи Цени")
-
-    if not last_prices:
-        st.info("ℹ️ Няма текущи цени.")
-    else:
-        cols = st.columns(3)
-        for i, (symbol, price) in enumerate(last_prices.items()):
-            with cols[i % 3]:
-                st.metric(symbol, format_price(price))
-
-# ===== ТАБ 4: СТАТИСТИКА =====
-with tab4:
-    st.subheader("📈 Статистика")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**📊 Обща статистика:**")
-        st.write(f"- Начален баланс: ${initial_balance:.2f}")
-        st.write(f"- Текущ баланс: ${balance:.2f}")
-        st.write(f"- Общ P&L: ${total_pnl:.2f}")
-        st.write(f"- Реализиран P&L: ${total_closed_pnl:.2f}")
-        st.write(f"- Нереализиран P&L: ${total_unrealized_pnl:.2f}")
-
-    with col2:
-        st.write("**🎯 Търговска статистика:**")
-        st.write(f"- Общо сделки: {len(trades_history)}")
-        st.write(f"- Отворени: {len(open_trades)}")
-        st.write(f"- Затворени: {len(closed_trades)}")
-        st.write(f"- Печеливши: {len(winning_trades)}")
-        st.write(f"- Загубени: {len(losing_trades)}")
-        st.write(f"- Win Rate: {win_rate:.1f}%")
-
-    if closed_trades:
-        st.markdown("---")
-        st.write("**📈 Разпределение на печалби/загуби:**")
-
-        # Най-добра и най-лоша сделка
-        best_trade = max(closed_trades, key=lambda t: safe_float(t.get('pnl', 0), 0))
-        worst_trade = min(closed_trades, key=lambda t: safe_float(t.get('pnl', 0), 0))
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.success(f"**🏆 Най-добра сделка:**")
-            st.write(f"- {best_trade.get('symbol')} {best_trade.get('action')}")
-            st.write(f"- P&L: ${safe_float(best_trade.get('pnl', 0), 0):.2f}")
-
-        with col2:
-            st.error(f"**💔 Най-лоша сделка:**")
-            st.write(f"- {worst_trade.get('symbol')} {worst_trade.get('action')}")
-            st.write(f"- P&L: ${safe_float(worst_trade.get('pnl', 0), 0):.2f}")
-
-# ===== FOOTER =====
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray; font-size: 12px;'>"
-    "🤖 Stocks AI Trading Bot v4.0 | Paper Trading Mode | Данните се обновяват от бота"
-    "</div>",
-    unsafe_allow_html=True
-)
-
-# ===== АВТОМАТИЧНО ОБНОВЯВАНЕ =====
-if st.session_state.auto_refresh:
-    import time
-    time.sleep(10)
-    st.rerun()
+if __name__ == "__main__":
+    main()
