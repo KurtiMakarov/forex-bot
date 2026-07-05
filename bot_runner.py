@@ -5,6 +5,7 @@ import os
 import signal
 import json
 from datetime import datetime
+import pytz
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -13,6 +14,22 @@ from utils.logger import setup_logger
 from utils.config import Config
 
 logger = setup_logger('bot_runner')
+
+
+def is_us_market_open() -> bool:
+    ny = pytz.timezone("America/New_York")
+    now = datetime.now(ny)
+
+    # Weekend
+    if now.weekday() >= 5:  # 5=Sat, 6=Sun
+        return False
+
+    # Regular session 09:30–16:00 ET
+    market_open = datetime.strptime("09:30", "%H:%M").time()
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    t = now.time()
+
+    return market_open <= t <= market_close
 
 
 class TradingBot:
@@ -169,6 +186,10 @@ class TradingBot:
         open_positions = self._open_positions_count()
         logger.info(f"📌 Open positions: {open_positions}/{self.max_open_positions}")
 
+        market_open_now = is_us_market_open()
+        if not market_open_now:
+            logger.info("🕒 US market is currently CLOSED. New orders will be blocked this cycle.")
+
         for symbol in self.symbols:
             if not self.is_running:
                 break
@@ -188,6 +209,11 @@ class TradingBot:
 
             if signal_data.get('action') not in ['buy', 'sell']:
                 logger.info(f"⏸️ {symbol}: HOLD")
+                continue
+
+            if not market_open_now:
+                logger.warning(f"🕒 Market closed. Skipping order for {symbol}.")
+                self._journal("order_blocked", {"symbol": symbol, "reason": "market_closed"})
                 continue
 
             # Max open positions guard
