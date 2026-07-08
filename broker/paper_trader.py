@@ -1,6 +1,6 @@
 """Paper Trader - Simulates trading for stocks with Trailing Stop"""
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List
 from utils.logger import setup_logger
 import json
 import os
@@ -8,7 +8,10 @@ import math
 
 logger = setup_logger('paper_trader')
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'state.json')
+STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'state.json'
+)
 
 
 def safe_float(value, default=0.0):
@@ -16,9 +19,10 @@ def safe_float(value, default=0.0):
     if value is None:
         return default
     try:
-        if math.isnan(float(value)) or math.isinf(float(value)):
+        f = float(value)
+        if math.isnan(f) or math.isinf(f):
             return default
-        return float(value)
+        return f
     except (TypeError, ValueError):
         return default
 
@@ -117,6 +121,10 @@ class PaperTrader:
             tp_price = safe_float(tp_price, 0.0)
             entry_price = safe_float(entry_price, 0.0)
 
+            if quantity <= 0:
+                logger.error(f"Invalid quantity for {symbol}: {quantity}")
+                return False
+
             if entry_price <= 0:
                 entry_price = self.last_prices.get(symbol, 0.0)
 
@@ -125,7 +133,6 @@ class PaperTrader:
                 return False
 
             action = action.upper()
-
             position_value = quantity * entry_price
             margin_required = position_value
 
@@ -137,30 +144,38 @@ class PaperTrader:
                     logger.info(f"Already have {action} position for {symbol}. Skipping.")
                     return True
                 else:
-                    # 🔥 ВАЖНО: Не затваряй позиция ако е отворена преди по-малко от 6 часа
                     opened_at = existing.get('opened_at', '')
                     if opened_at:
                         try:
                             opened_time = datetime.fromisoformat(opened_at)
                             time_held = datetime.now() - opened_time
-                            if time_held < timedelta(hours=12):  # 🔥 Увеличено от 2 на 6 часа
+                            if time_held < timedelta(hours=12):
                                 logger.info(
-                                    f"⏳ Position {symbol} held for {time_held.seconds // 3600}h {(time_held.seconds // 60) % 60}m. Waiting 6h before closing.")
+                                    f"⏳ Position {symbol} held for {time_held.seconds // 3600}h "
+                                    f"{(time_held.seconds // 60) % 60}m. Waiting 12h before closing."
+                                )
                                 return False
-                        except:
+                        except Exception:
                             pass
 
                     logger.info(f"Closing opposite position for {symbol}")
                     self._close_position(symbol, entry_price, "Opposite signal")
 
-            # 🔥 🔥 🔥 TRAILING STOP НАСТРОЙКА 🔥 🔥 🔥
-            # Изчисляваме trailing distance на базата на ATR или фиксиран %
-            if atr_value and atr_value > 0:
-                trailing_distance = atr_value * 1.5
-            else:
-                trailing_distance = entry_price * 0.03  # 3% fallback
+            # Balance lock for BUY positions
+            if action == 'BUY':
+                if margin_required > self.balance:
+                    logger.error(
+                        f"Insufficient balance for {symbol}: need ${margin_required:.2f}, have ${self.balance:.2f}"
+                    )
+                    return False
+                self.balance -= margin_required
 
-            # Записваме initial_trailing_stop (първоначален стоп)
+            # Trailing stop setup
+            if atr_value and safe_float(atr_value, 0.0) > 0:
+                trailing_distance = safe_float(atr_value, 0.0) * 1.5
+            else:
+                trailing_distance = entry_price * 0.03
+
             if action == 'BUY':
                 initial_trailing_stop = entry_price - trailing_distance
             else:
@@ -178,11 +193,10 @@ class PaperTrader:
                 'is_forex': False,
                 'opened_at': datetime.now().isoformat(),
                 'status': 'OPEN',
-                # 🔥 🔥 🔥 TRAILING STOP ПОЛЕТА 🔥 🔥 🔥
                 'trailing_enabled': True,
                 'trailing_distance': trailing_distance,
-                'highest_price': entry_price,  # За BUY - максимална цена
-                'lowest_price': entry_price,  # За SELL - минимална цена
+                'highest_price': entry_price,
+                'lowest_price': entry_price,
                 'trailing_stop': initial_trailing_stop
             }
 
@@ -194,8 +208,8 @@ class PaperTrader:
                 'action': action,
                 'quantity': quantity,
                 'entry_price': entry_price,
-                'stop_loss': sl_price if sl_price > 0 else initial_trailing_stop,
-                'take_profit': tp_price if tp_price > 0 else None,
+                'stop_loss': position['stop_loss'],
+                'take_profit': position['take_profit'],
                 'margin_used': margin_required,
                 'position_value': position_value,
                 'is_forex': False,
@@ -208,10 +222,10 @@ class PaperTrader:
 
             logger.info(f"📈 Paper Order: {action} {quantity} {symbol} @ ${entry_price:.2f}")
             logger.info(
-                f"🎯 Trailing Stop enabled: distance=${trailing_distance:.2f}, initial SL=${initial_trailing_stop:.2f}")
+                f"🎯 Trailing Stop enabled: distance=${trailing_distance:.2f}, initial SL=${initial_trailing_stop:.2f}"
+            )
             logger.info(f"💵 Cost: ${margin_required:.2f}, Free balance: ${self.balance:.2f}")
 
-            # Telegram notification
             notifier = self._get_notifier()
             if notifier:
                 try:
@@ -219,8 +233,8 @@ class PaperTrader:
                         'pair': symbol,
                         'action': action.lower(),
                         'entry_price': entry_price,
-                        'stop_loss': initial_trailing_stop,
-                        'take_profit': tp_price if tp_price > 0 else 0,
+                        'stop_loss': position['stop_loss'],
+                        'take_profit': position['take_profit'] if position['take_profit'] else 0,
                         'position_size': quantity,
                         'confidence': 0.75,
                         'reason': f'Signal executed (Trailing Stop: ${trailing_distance:.2f})'
@@ -236,17 +250,12 @@ class PaperTrader:
             return False
 
     def update_trailing_stops(self, current_prices: Dict[str, float]) -> List[tuple]:
-        """
-        🔥 🔥 🔥 TRAILING STOP ЛОГИКА 🔥 🔥 🔥
-        Обновява stop loss-ите на всички позиции на базата на текущите цени.
-        Стопът се движи САМО в посока на печалбата, никога назад.
-        """
+        """Update trailing stops for open positions."""
         moved_stops = []
 
         for symbol, position in list(self.positions.items()):
             if symbol not in current_prices:
                 continue
-
             if not position.get('trailing_enabled', False):
                 continue
 
@@ -258,51 +267,27 @@ class PaperTrader:
             trailing_distance = safe_float(position.get('trailing_distance', 0.0), 0.0)
 
             if action == 'BUY':
-                # 🔥 За BUY: следим максималната цена
                 highest_price = safe_float(position.get('highest_price', 0.0), 0.0)
-
-                # Ако текущата цена е по-висока от предишната максимална
                 if current_price > highest_price:
-                    # Обновяваме максималната цена
                     position['highest_price'] = current_price
-
-                    # Новият trailing stop
                     new_trailing_stop = current_price - trailing_distance
                     old_stop = safe_float(position.get('stop_loss', 0.0), 0.0)
 
-                    # 🔥 ВАЖНО: Стопът никога не се връща назад!
                     if new_trailing_stop > old_stop:
                         position['stop_loss'] = new_trailing_stop
                         position['trailing_stop'] = new_trailing_stop
-
-                        profit_locked = new_trailing_stop - safe_float(position.get('entry_price', 0.0), 0.0)
-                        logger.info(
-                            f"📈 🎯 {symbol} TRAILING STOP MOVED: ${old_stop:.2f} → ${new_trailing_stop:.2f} (locked profit: ${profit_locked:.2f})")
-
                         moved_stops.append((symbol, old_stop, new_trailing_stop))
 
             elif action == 'SELL':
-                # 🔥 За SELL: следим минималната цена
                 lowest_price = safe_float(position.get('lowest_price', float('inf')), float('inf'))
-
-                # Ако текущата цена е по-ниска от предишната минимална
                 if current_price < lowest_price:
-                    # Обновяваме минималната цена
                     position['lowest_price'] = current_price
-
-                    # Новият trailing stop
                     new_trailing_stop = current_price + trailing_distance
                     old_stop = safe_float(position.get('stop_loss', 0.0), 0.0)
 
-                    # 🔥 ВАЖНО: Стопът никога не се връща назад!
                     if old_stop == 0 or new_trailing_stop < old_stop:
                         position['stop_loss'] = new_trailing_stop
                         position['trailing_stop'] = new_trailing_stop
-
-                        profit_locked = safe_float(position.get('entry_price', 0.0), 0.0) - new_trailing_stop
-                        logger.info(
-                            f"📉 🎯 {symbol} TRAILING STOP MOVED: ${old_stop:.2f} → ${new_trailing_stop:.2f} (locked profit: ${profit_locked:.2f})")
-
                         moved_stops.append((symbol, old_stop, new_trailing_stop))
 
         if moved_stops:
@@ -327,10 +312,10 @@ class PaperTrader:
 
         if action == 'BUY':
             pnl = (exit_price - entry_price) * quantity
+            self.balance += cost_basis + pnl
         else:
             pnl = (entry_price - exit_price) * quantity
-
-        self.balance += cost_basis + pnl
+            self.balance += pnl
 
         for trade in reversed(self.trades_history):
             if trade['symbol'] == symbol and trade['status'] == 'OPEN':
@@ -345,9 +330,10 @@ class PaperTrader:
 
         pnl_emoji = "📈" if pnl >= 0 else "📉"
         logger.info(
-            f"{pnl_emoji} Closed {symbol}: Exit ${exit_price:.2f}, P&L = ${pnl:.2f}, Reason: {reason}, New balance: ${self.balance:.2f}")
+            f"{pnl_emoji} Closed {symbol}: Exit ${exit_price:.2f}, P&L = ${pnl:.2f}, "
+            f"Reason: {reason}, New balance: ${self.balance:.2f}"
+        )
 
-        # Telegram notification
         notifier = self._get_notifier()
         if notifier:
             try:
@@ -400,7 +386,6 @@ class PaperTrader:
                 continue
 
             current_price = safe_float(current_prices[symbol], 0.0)
-
             if current_price <= 0:
                 continue
 
@@ -411,27 +396,21 @@ class PaperTrader:
             if sl <= 0 and tp <= 0:
                 continue
 
-            # Check Stop Loss
             if sl > 0:
                 if action == 'BUY' and current_price <= sl:
-                    logger.info(f"🔴 {symbol} hit Stop Loss at ${current_price:.2f} (SL: ${sl:.2f})")
                     pnl = self._close_position(symbol, current_price, "🛑 Stop Loss")
                     closed.append((symbol, 'STOP_LOSS', pnl))
                     continue
                 elif action == 'SELL' and current_price >= sl:
-                    logger.info(f"🔴 {symbol} hit Stop Loss at ${current_price:.2f} (SL: ${sl:.2f})")
                     pnl = self._close_position(symbol, current_price, "🛑 Stop Loss")
                     closed.append((symbol, 'STOP_LOSS', pnl))
                     continue
 
-            # Check Take Profit
             if tp > 0:
                 if action == 'BUY' and current_price >= tp:
-                    logger.info(f"🟢 {symbol} hit Take Profit at ${current_price:.2f} (TP: ${tp:.2f})")
                     pnl = self._close_position(symbol, current_price, "🎯 Take Profit")
                     closed.append((symbol, 'TAKE_PROFIT', pnl))
                 elif action == 'SELL' and current_price <= tp:
-                    logger.info(f"🟢 {symbol} hit Take Profit at ${current_price:.2f} (TP: ${tp:.2f})")
                     pnl = self._close_position(symbol, current_price, "🎯 Take Profit")
                     closed.append((symbol, 'TAKE_PROFIT', pnl))
 

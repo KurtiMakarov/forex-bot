@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 venv/
 data/
+.DS_Store
+state.json
+state.json.old
+.idea/
+runtime/

@@ -1,50 +1,59 @@
 app:
   name: "Stocks Trading AI"
-  version: "4.0.0"
+  version: "4.3.0"
   debug: false
 
 broker:
-  type: "paper_trader"
+  type: "paper_trader"          # paper_trader | ibkr
+  mode: "paper"                 # paper | live
+  allow_live_trading: false     # must be true + readiness pass for live unlock
   ib_host: "127.0.0.1"
   ib_port: 7497
   ib_client_id: 1
 
-# 13 АКЦИИ ОТ РАЗЛИЧНИ СЕКТОРИ
 data:
   supported_pairs:
-    # Технологични (5)
     - "AAPL"
     - "MSFT"
     - "GOOGL"
     - "TSLA"
     - "NVDA"
-    # E-commerce & Social (2)
     - "AMZN"
     - "META"
-    # Финансови (2)
     - "JPM"
     - "V"
-    # Здравеопазване (2)
     - "JNJ"
     - "UNH"
-    # Енергия (2)
     - "XOM"
     - "CVX"
   historical_days: 100
 
 trading:
-  risk_per_trade: 0.02
-  max_daily_loss: 0.05
+  risk_per_trade: 0.0025
+  max_daily_loss: 0.01
+  max_position_pct: 0.03
   min_confidence: 0.65
-  max_open_positions: 5
+  max_open_positions: 3
+  kill_switch_on_daily_loss: true
+  scan_interval_seconds: 60
+  journal_path: "journal/trades.jsonl"
+  block_orders_when_market_closed: true
+
+  live_readiness:
+    enabled: true
+    min_closed_trades: 30
+    lookback_days: 30
+    min_profit_factor: 1.20
+    max_drawdown: 0.05
+    min_win_rate: 0.40
 
 telegram:
-  token: "8857498820:AAHiKTrqUOvuiq-2y_5GecwkiNapToa_lY4"
-  chat_id: "896074085"
+  token: "${TELEGRAM_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
 
 api_keys:
-  news_api: ""
-  alpha_vantage: ""
+  news_api: "${NEWS_API_KEY}"
+  alpha_vantage: "${ALPHA_VANTAGE_KEY}"
 
 strategies:
   enabled:
